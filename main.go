@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -49,26 +50,42 @@ func HealthCheck(w http.ResponseWriter, r *http.Request) {
 
 	apps := conf.Apps
 
+	w.Write([]byte(GetStatuses(apps)))
+}
+
+func GetStatuses(apps []string) string {
 	statuses := ""
 	for _, app := range apps {
-		statusFile := app + "/status.gohc"
 
 		if app == "//self" {
-			statusFile = "status.gohc"
+			app = "."
 		}
 
-		content, err := ioutil.ReadFile(statusFile)
+		appFiles, err := ioutil.ReadDir(app)
 
 		if err != nil {
-			log.Fatal("error:", err)
-			statuses += app + " - can't read file: " + statusFile + "\n"
-		} else {
-			statuses += string(content) + "\n"
+			log.Fatalf("can't open dir=%s; %s", app, err)
 		}
 
+		for _, file := range appFiles {
+			if filepath.Ext(file.Name()) == ".gohc" {
+				statuses += getStatus(file.Name(), app)
+			}
+		}
 	}
 
-	w.Write([]byte(statuses))
+	return statuses
+}
+
+func getStatus(file string, app string) string {
+	content, err := ioutil.ReadFile(app + "/" + file)
+
+	if err != nil {
+		log.Fatal("error:", err)
+		return app + " - can't read file: " + file + "\n"
+	} else {
+		return string(content) + "\n"
+	}
 }
 
 func UpdateStatus(ticker time.Ticker) {
