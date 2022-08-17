@@ -159,7 +159,6 @@ func getLogContent(file string, app App) string {
 
 func UpdateStatus(ticker time.Ticker) {
 	for range ticker.C {
-		log.Printf("update status by ticker")
 		ioutil.WriteFile("status.gohc", []byte("gohc - ok; last-update(utc): "+time.Now().UTC().Format(time.StampMilli)), 0666)
 	}
 }
