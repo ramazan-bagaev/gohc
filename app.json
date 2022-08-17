@@ -1,5 +1,7 @@
 {
     "Address": "127.0.0.1",
     "Port": 8901,
-    "Apps": ["//self"]
+    "Apps": [
+        { "Name": "//self", "Path": "."}
+    ]
 }

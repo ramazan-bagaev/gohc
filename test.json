@@ -1,0 +1,8 @@
+{
+    "Address": "localhost",
+    "Port": 8001,
+    "Apps": [ 
+        {"Name":"//self", "Path": "."},
+        {"Name":"test-app", "Path": "test"}
+    ]
+}
