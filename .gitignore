@@ -1,1 +1,7 @@
-gohc
+/gohc
+/.build/
+/clients/*/target/
+*.log
+/clients/target/
+/dist/
+__pycache__/
