@@ -23,6 +23,7 @@ type RemoteConfig struct {
 	URL         string `json:"url"`
 	Username    string `json:"username,omitempty"`
 	PasswordEnv string `json:"password_env,omitempty"`
+	Timeout     string `json:"timeout,omitempty"`
 }
 
 type remoteMonitor struct {
@@ -69,9 +70,17 @@ func remoteMonitors(configs []RemoteConfig, requireCredentials ...bool) ([]remot
 				return nil, fmt.Errorf("remote %s: password environment variable is empty", config.Name)
 			}
 		}
+		timeout := 10 * time.Second
+		if config.Timeout != "" {
+			var err error
+			timeout, err = time.ParseDuration(config.Timeout)
+			if err != nil || timeout < time.Second || timeout > 30*time.Second {
+				return nil, fmt.Errorf("remote %s: timeout must be between one and 30 seconds", config.Name)
+			}
+		}
 		result = append(result, remoteMonitor{
 			name: config.Name, endpoint: endpoint, username: config.Username, password: password,
-			client: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+			client: &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		})
 	}
 	return result, nil

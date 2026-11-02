@@ -399,8 +399,10 @@ multiply observations. Each configured monitor name gives its reports a distinct
 identity, including services with identical names on different servers.
 
 Remote endpoints need gohc **v0.2.0 or newer**. Collection uses the normal poll
-interval, up to 32 peers in parallel, a five-second HTTP timeout per peer, and a
-4 MiB snapshot limit. Redirects are not followed. Authentication values and remote
+interval, up to 32 peers in parallel, a ten-second HTTP timeout per peer, and a
+4 MiB snapshot limit. Each peer can override `timeout` (for example `"15s"`),
+between one and 30 seconds. Peer requests run alongside local Docker collection.
+Redirects are not followed. Authentication values and remote
 URLs are never exported in status responses or saved observations. Credentials
 are sent only to the configured endpoint; keep password variables private.
 

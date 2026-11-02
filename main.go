@@ -179,6 +179,8 @@ func poll(ctx context.Context, s *Store, dir, state string, useDocker bool, inte
 		now := time.Now().UTC()
 		files, err := scanFiles(dir, now)
 		s.apply("filesystem", files, err, now)
+		remoteDone := make(chan struct{})
+		go func() { defer close(remoteDone); s.collectRemotes(ctx, remotes) }()
 		if useDocker {
 			err = nil
 			if dc == nil {
@@ -196,7 +198,7 @@ func poll(ctx context.Context, s *Store, dir, state string, useDocker bool, inte
 				dc = nil
 			}
 		}
-		s.collectRemotes(ctx, remotes)
+		<-remoteDone
 		if err := s.save(state); err != nil {
 			log.Printf("save observations: %v", err)
 		}

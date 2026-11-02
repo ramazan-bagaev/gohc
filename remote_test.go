@@ -295,3 +295,18 @@ func TestRemoteBoundsAndStatusPreservation(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteTimeoutConfiguration(t *testing.T) {
+	for _, value := range []string{"0s", "31s", "bad"} {
+		if _, err := remoteMonitors([]RemoteConfig{{Name: "peer", URL: "https://example.com", Timeout: value}}); err == nil {
+			t.Fatal("accepted", value)
+		}
+	}
+	remote := testRemotes(t, RemoteConfig{Name: "peer", URL: "https://example.com", Timeout: "15s"})[0]
+	if remote.client.Timeout != 15*time.Second {
+		t.Fatal(remote.client.Timeout)
+	}
+	if testRemotes(t, RemoteConfig{Name: "peer", URL: "https://example.com"})[0].client.Timeout != 10*time.Second {
+		t.Fatal("unexpected default")
+	}
+}
