@@ -1,5 +1,6 @@
 {
   "poll_interval": "1m",
   "machine_interval": "1m",
-  "dashboard_refresh": "1m"
+  "dashboard_refresh": "1m",
+  "remotes": []
 }

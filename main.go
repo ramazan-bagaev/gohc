@@ -54,7 +54,7 @@ func run(args []string) error {
 	if value := os.Getenv("GOHC_CONFIG"); value != "" {
 		defaultConfig = value
 	}
-	configPath := flags.String("config", defaultConfig, "optional timing config JSON file")
+	configPath := flags.String("config", defaultConfig, "optional monitor config JSON file")
 	state := flags.String("state", filepath.Join(configDir, "gohc", "state", "observations.json"), "monitor-owned observation snapshot")
 	interval := flags.Duration("interval", defaultUpdateInterval, "source poll interval")
 	machineInterval := flags.Duration("machine-interval", defaultUpdateInterval, "machine sampling interval")
@@ -69,9 +69,10 @@ func run(args []string) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
+	var config MonitorConfig
 	explicit := map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
-	if e = loadTimingConfig(*configPath, explicit["config"] || os.Getenv("GOHC_CONFIG") != "", explicit, interval, machineInterval, refresh); e != nil {
+	if e = loadMonitorConfig(*configPath, explicit["config"] || os.Getenv("GOHC_CONFIG") != "", explicit, interval, machineInterval, refresh, &config); e != nil {
 		return e
 	}
 	for name, value := range map[string]time.Duration{"interval": *interval, "machine-interval": *machineInterval, "refresh": *refresh} {
@@ -94,10 +95,26 @@ func run(args []string) error {
 	if rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return fmt.Errorf("state must be outside the scanned report directory")
 	}
+	remotes, e := remoteMonitors(config.Remotes, command != "status")
+	if e != nil {
+		return e
+	}
 	store := newStore()
+	store.name = config.Name
+	if store.name == "" {
+		store.name, _ = os.Hostname()
+	}
+	if store.name == "" {
+		store.name = "Local"
+	}
+	if len(store.name) > 256 {
+		return fmt.Errorf("monitor name must be at most 256 bytes")
+	}
+
 	if e = store.load(statePath); e != nil {
 		return fmt.Errorf("read persisted observations: %w", e)
 	}
+	store.configureRemotes(remotes)
 	if command == "status" {
 		b, e := json.MarshalIndent(store.snapshot(time.Now().UTC()), "", "  ")
 		if e != nil {
@@ -132,7 +149,7 @@ func run(args []string) error {
 	machineDone := make(chan struct{})
 	go func() { defer close(machineDone); machineLoop(ctx, store, root, *machineInterval) }()
 	done := make(chan struct{})
-	go func() { defer close(done); poll(ctx, store, root, statePath, *docker, *interval) }()
+	go func() { defer close(done); poll(ctx, store, root, statePath, *docker, *interval, remotes...) }()
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -149,7 +166,7 @@ func run(args []string) error {
 	}
 	return e
 }
-func poll(ctx context.Context, s *Store, dir, state string, useDocker bool, interval time.Duration) {
+func poll(ctx context.Context, s *Store, dir, state string, useDocker bool, interval time.Duration, remotes ...remoteMonitor) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	var dc *dockerClient
@@ -179,6 +196,7 @@ func poll(ctx context.Context, s *Store, dir, state string, useDocker bool, inte
 				dc = nil
 			}
 		}
+		s.collectRemotes(ctx, remotes)
 		if err := s.save(state); err != nil {
 			log.Printf("save observations: %v", err)
 		}
@@ -194,6 +212,7 @@ func poll(ctx context.Context, s *Store, dir, state string, useDocker bool, inte
 }
 
 type dashboardRow struct {
+	Origin        string
 	Containerized bool
 	UpdatedAt     string
 	UpdatedLabel  string
@@ -207,7 +226,14 @@ type dashboardMetric struct {
 	Name  string
 	Value string
 }
+type dashboardGroup struct {
+	Name     string
+	Rows     []dashboardRow
+	Machine  []dashboardMetric
+	Problems []string
+}
 type dashboardView struct {
+	Groups         []dashboardGroup
 	RefreshSeconds int
 	Machine        []dashboardMetric
 	Rows           []dashboardRow
@@ -241,7 +267,7 @@ func dashboardData(snapshot Snapshot, refresh ...time.Duration) dashboardView {
 		if name == "" {
 			name = "Unreadable report"
 		}
-		row := dashboardRow{Name: name, Status: "Unknown", Tone: "unknown", Rank: 3, Containerized: v.Source == "docker" && v.ContainerID != ""}
+		row := dashboardRow{Origin: v.Origin, Name: name, Status: "Unknown", Tone: "unknown", Rank: 3, Containerized: (v.Source == "docker" || v.OriginSource == "docker") && v.ContainerID != ""}
 		if v.Report != nil {
 			updated := v.Report.UpdatedAt.UTC()
 			row.UpdatedAt = updated.Format(time.RFC3339Nano)
@@ -265,6 +291,17 @@ func dashboardData(snapshot Snapshot, refresh ...time.Duration) dashboardView {
 			row.Status = "Stopped"
 			row.Tone = "unknown"
 			row.Rank = 3
+		case "source_unavailable":
+			row.Status = "Unavailable"
+			row.Rank = 0
+		case "missing":
+			row.Status = "Missing"
+			row.Rank = 1
+		case "awaiting_verification":
+			row.Status = "Checking"
+		case "invalid":
+			row.Status = "Invalid"
+			row.Rank = 0
 		case "paused":
 			row.Status = "Paused"
 			row.Tone = "unknown"
@@ -287,6 +324,40 @@ func dashboardData(snapshot Snapshot, refresh ...time.Duration) dashboardView {
 	if snapshot.PersistenceError != "" {
 		view.Problems = append(view.Problems, "Could not save status")
 	}
+	var names []string
+	for source := range snapshot.Sources {
+		if strings.HasPrefix(source, "remote:") {
+			names = append(names, strings.TrimPrefix(source, "remote:"))
+		}
+	}
+	sort.Strings(names)
+	if len(names) > 0 {
+		local := dashboardGroup{Name: snapshot.Monitor, Machine: view.Machine, Problems: view.Problems}
+		if local.Name == "" {
+			local.Name = "Local"
+		}
+		for _, row := range view.Rows {
+			if row.Origin == "" {
+				local.Rows = append(local.Rows, row)
+			}
+		}
+		view.Groups = append(view.Groups, local)
+		for _, name := range names {
+			state := snapshot.Sources["remote:"+name]
+			group := dashboardGroup{Name: name}
+			for _, row := range view.Rows {
+				if row.Origin == name {
+					group.Rows = append(group.Rows, row)
+				}
+			}
+			if state.Error != "" {
+				group.Problems = []string{"Monitor unavailable"}
+			} else if state.Machine != nil {
+				group.Machine = dashboardData(Snapshot{Machine: state.Machine}).Machine
+			}
+			view.Groups = append(view.Groups, group)
+		}
+	}
 	return view
 }
 
@@ -302,6 +373,7 @@ var page = template.Must(template.New("dashboard").Parse(`<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;padding:48px 24px}
 main{max-width:720px;margin:0 auto}
+h2{font-size:14px;font-weight:600;margin:28px 0 16px}section:first-of-type h2{margin-top:0}
 h1{font-size:22px;font-weight:650;letter-spacing:-.7px;margin:0 0 32px}
 .machine{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;padding:0 20px;margin:0 0 24px}
 .metric{display:flex;align-items:baseline;gap:10px}
@@ -327,12 +399,7 @@ h1{font-size:22px;font-weight:650;letter-spacing:-.7px;margin:0 0 32px}
 </head>
 <body><main>
 <h1>gohc</h1>
-{{if .Machine}}<div class="machine">{{range .Machine}}<div class="metric"><span class="metric-label">{{.Name}}</span><span class="metric-value">{{.Value}}</span></div>{{end}}</div>{{end}}
-{{range .Problems}}<p class="problem">{{.}}</p>{{end}}
-<div class="services">
-{{range .Rows}}<div class="service"><div class="service-name"><span class="name">{{.Name}}</span>{{if .Containerized}}<span class="container-kind" title="Discovered through Docker">Docker</span>{{end}}</div><div class="health"><span class="status {{.Tone}}"><span class="dot" aria-hidden="true"></span>{{.Status}}</span>{{if and (ne .Status "Healthy") .UpdatedAt}}<time class="updated" datetime="{{.UpdatedAt}}" title="Last report: {{.UpdatedFull}}">Updated {{.UpdatedLabel}}</time>{{end}}</div></div>
-{{else}}<p class="empty">No services yet</p>{{end}}
-</div>
+{{if .Groups}}{{range .Groups}}<section><h2>{{.Name}}</h2>{{template "services" .}}</section>{{end}}{{else}}{{template "services" .}}{{end}}
 </main>
 <script>
 for (const element of document.querySelectorAll("time.updated")) {
@@ -343,19 +410,32 @@ for (const element of document.querySelectorAll("time.updated")) {
   }
 }
 </script>
-</body></html>`))
+</body></html>
+{{define "services"}}{{if .Machine}}<div class="machine">{{range .Machine}}<div class="metric"><span class="metric-label">{{.Name}}</span><span class="metric-value">{{.Value}}</span></div>{{end}}</div>{{end}}
+{{range .Problems}}<p class="problem">{{.}}</p>{{end}}
+<div class="services">
+{{range .Rows}}<div class="service"><div class="service-name"><span class="name">{{.Name}}</span>{{if .Containerized}}<span class="container-kind" title="Discovered through Docker">Docker</span>{{end}}</div><div class="health"><span class="status {{.Tone}}"><span class="dot" aria-hidden="true"></span>{{.Status}}</span>{{if and (ne .Status "Healthy") .UpdatedAt}}<time class="updated" datetime="{{.UpdatedAt}}" title="Last report: {{.UpdatedFull}}">Updated {{.UpdatedLabel}}</time>{{end}}</div></div>
+{{else}}<p class="empty">No services yet</p>{{end}}
+</div>{{end}}`))
 
 func dashboard(s *Store, refresh ...time.Duration) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" {
-			w.WriteHeader(405)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		json.NewEncoder(w).Encode(s.snapshot(time.Now().UTC()))
-	})
+	for _, endpoint := range []string{"/api/status", "/api/local"} {
+		local := endpoint == "/api/local"
+		mux.HandleFunc(endpoint, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != "GET" {
+				w.WriteHeader(405)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			snapshot := s.snapshot(time.Now().UTC())
+			if local {
+				snapshot = s.localSnapshot(time.Now().UTC())
+			}
+			json.NewEncoder(w).Encode(snapshot)
+		})
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)

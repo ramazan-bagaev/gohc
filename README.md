@@ -364,6 +364,58 @@ Keep the signing directory and its revocation certificate backed up securely.
 Only the exported public key belongs with shared release artifacts. Maven Central
 also needs the public key available on a supported keyserver before publication.
 
+## Shared monitor reporting
+
+Any monitor can show other monitors alongside its own applications. Add optional
+`name` and `remotes` entries to its usual config (`gohc/config.json` in the OS
+config directory, or `GOHC_CONFIG` / `--config`):
+
+```json
+{
+  "name": "digitalocean",
+  "poll_interval": "1m",
+  "remotes": [
+    {
+      "name": "static-ocean",
+      "url": "https://gohc-static.example.com",
+      "username": "gohc",
+      "password_env": "GOHC_REMOTE_PASSWORD"
+    }
+  ]
+}
+```
+
+Set the named environment variable in the monitor process (for a service, use a
+private systemd `EnvironmentFile`). Omit both authentication fields for an
+endpoint that does not require authentication. Use HTTPS outside a trusted local
+network. Config changes take effect after restarting the monitor.
+
+The dashboard groups apps and machine CPU/memory/disk by monitor. `/api/status`
+returns the combined view. `/api/local` returns only that machine's own reports
+and metrics, with API version 1. Remote collection always requests `/api/local`,
+including when a base URL or `/api/status` URL was configured. A full mesh is safe:
+no imported reports are re-exported, so reciprocal endpoints do not recurse or
+multiply observations. Each configured monitor name gives its reports a distinct
+identity, including services with identical names on different servers.
+
+Remote endpoints need gohc **v0.2.0 or newer**. Collection uses the normal poll
+interval, up to 32 peers in parallel, a five-second HTTP timeout per peer, and a
+4 MiB snapshot limit. Redirects are not followed. Authentication values and remote
+URLs are never exported in status responses or saved observations. Credentials
+are sent only to the configured endpoint; keep password variables private.
+
+Original heartbeat timestamps and TTLs are preserved. Fetching a remote snapshot
+does not refresh an application's heartbeat. If a peer is unreachable, its last
+valid reports remain cached and display **Unavailable**, including after a
+restart until reverified. A peer's invalid, stale, missing, stopped and Docker
+lifecycle statuses are preserved. An unreachable peer does not mark the local
+monitor unhealthy. Removing a peer from config removes its cached observations
+on restart. Cached reports remain available through `gohc status` without needing
+the remote password environment variables.
+
+Single-monitor setup is unchanged when `remotes` is absent or empty. Client
+libraries and application containers require no changes for monitor sharing.
+
 ## CLI releases
 
 Tagged releases provide Linux and macOS archives for amd64 and arm64. Each archive

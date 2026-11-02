@@ -16,6 +16,9 @@ import (
 )
 
 type Observation struct {
+	Origin         string         `json:"origin,omitempty"`
+	OriginSource   string         `json:"origin_source,omitempty"`
+	RemoteStatus   string         `json:"remote_status,omitempty"`
 	ID             string         `json:"id"`
 	Source         string         `json:"source"`
 	Location       string         `json:"location"`
@@ -31,10 +34,13 @@ type Observation struct {
 	Status         string         `json:"status"`
 }
 type SourceState struct {
-	Error       string    `json:"error,omitempty"`
-	LastSuccess time.Time `json:"last_success,omitempty"`
+	Machine     *MachineStatus `json:"machine,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	LastSuccess time.Time      `json:"last_success,omitempty"`
 }
 type Snapshot struct {
+	Version          int                    `json:"version"`
+	Monitor          string                 `json:"monitor"`
 	Observations     []Observation          `json:"observations"`
 	Sources          map[string]SourceState `json:"sources"`
 	GeneratedAt      time.Time              `json:"generated_at"`
@@ -42,6 +48,7 @@ type Snapshot struct {
 	Machine          *MachineStatus         `json:"machine,omitempty"`
 }
 type Store struct {
+	name             string
 	mu               sync.RWMutex
 	entries          map[string]Observation
 	sources          map[string]SourceState
@@ -104,7 +111,7 @@ func (s *Store) apply(source string, entries []Observation, scanErr error, now t
 func (s *Store) snapshot(now time.Time) Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	result := Snapshot{Sources: map[string]SourceState{}, GeneratedAt: now, Observations: []Observation{}, PersistenceError: s.persistenceError, Machine: s.machine}
+	result := Snapshot{Version: 1, Monitor: s.name, Sources: map[string]SourceState{}, GeneratedAt: now, Observations: []Observation{}, PersistenceError: s.persistenceError, Machine: s.machine}
 	for k, v := range s.sources {
 		result.Sources[k] = v
 	}
@@ -119,6 +126,8 @@ func (s *Store) snapshot(now time.Time) Snapshot {
 			v.Status = "source_unavailable"
 		case v.Error != "":
 			v.Status = "invalid"
+		case v.Origin != "" && v.RemoteStatus != "" && v.RemoteStatus != "healthy" && v.RemoteStatus != "unhealthy" && v.RemoteStatus != "unknown":
+			v.Status = v.RemoteStatus
 		case v.ContainerState != "" && v.ContainerState != "running":
 			v.Status = v.ContainerState
 		case v.Report.Status == "stopped":
@@ -129,6 +138,9 @@ func (s *Store) snapshot(now time.Time) Snapshot {
 			v.Status = "missing"
 		default:
 			v.Status = v.Report.Status
+			if v.Origin != "" && v.RemoteStatus != "" {
+				v.Status = v.RemoteStatus
+			}
 		}
 		result.Observations = append(result.Observations, v)
 	}
@@ -270,7 +282,7 @@ func (s *Store) selfHealth(now time.Time, interval time.Duration) client.Health 
 		return client.Health{Status: "unhealthy", Message: "Cannot persist observations"}
 	}
 	for name, source := range s.sources {
-		if source.Error != "" {
+		if source.Error != "" && !strings.HasPrefix(name, "remote:") {
 			return client.Health{Status: "unhealthy", Message: name + " collection unavailable"}
 		}
 	}
