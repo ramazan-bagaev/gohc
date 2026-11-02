@@ -404,3 +404,14 @@ python3 clients/release-local.py --publish
 The publication helper checks for a clean checkout, matching local version tag and
 Central server configuration before uploading. Publication is immutable; use a new
 version for changes after release. See `RELEASING.md` for the initial release plan.
+
+### Python applications
+
+The stdlib-only [Python client](clients/python/README.md) uses the same report
+protocol and Docker discovery as the Go and Java clients. Start a heartbeat with
+`from gohc import start; health = start("my-app")`, or attach
+`instrument_fastapi(app, "my-api")` before starting an ASGI server.
+
+For static sites, `cmd/gohc-heartbeat` uses the Go client with a local HTTP check:
+`gohc-heartbeat --service my-site --url http://127.0.0.1:80/`.
+It belongs inside the app container; it requires no shared mounts or ports.
